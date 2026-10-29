@@ -1,185 +1,141 @@
 import asyncio
-import html
-import os
+import logging
 import sqlite3
-import time
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.enums import ChatType
-from aiogram.filters import CommandStart
-from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-    ReplyParameters,
-)
+# ================= CONFIGURATION =================
+TOKEN = "9276476302:AAFdxdGBKwfwSi7U1WXXzDOY6Bg-H_HwVBQ"
+ADMIN_ID = 5226782090  # Твой числовой Telegram ID
 
-# Токен и ID берём из переменных окружения, а не из кода
-TOKEN = os.environ["BOT_TOKEN"]
-ADMIN_ID = 5226782090  # ваш Telegram ID (узнать: @userinfobot)
+logging.basicConfig(level=logging.INFO)
+router = Router()
 
-GREETING = "Привет! Напишите сообщение, и я передам его владельцу."
-RECEIVED = "✅ Сообщение успешно передано владельцу. Ожидайте."
-
-db = sqlite3.connect("bot.db")
-db.execute(
-    "CREATE TABLE IF NOT EXISTS msgs (admin_msg_id INTEGER PRIMARY KEY, user_id INTEGER, user_msg_id INTEGER)"
-)
-db.execute("CREATE TABLE IF NOT EXISTS banned (user_id INTEGER PRIMARY KEY)")
-db.execute(
-    "CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, full_name TEXT, username TEXT, first_seen INTEGER)"
-)
-db.commit()
-
-dp = Dispatcher()
-
-
-def save_user(user) -> None:
-    """Запоминаем пользователя; дата первого обращения не перезаписывается."""
-    db.execute(
-        "INSERT INTO users VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(user_id) DO UPDATE SET full_name=excluded.full_name, username=excluded.username",
-        (user.id, user.full_name, user.username, int(time.time())),
-    )
-    db.commit()
-
-
-def days_ago(ts) -> str:
-    if not ts:
-        return "—"
-    d = int((time.time() - ts) // 86400)
-    if d == 0:
-        return "сегодня"
-    if 11 <= d % 100 <= 14:
-        word = "дней"
-    elif d % 10 == 1:
-        word = "день"
-    elif 2 <= d % 10 <= 4:
-        word = "дня"
-    else:
-        word = "дней"
-    return f"{d} {word} назад"
-
-
-def is_banned(user_id: int) -> bool:
-    return db.execute("SELECT 1 FROM banned WHERE user_id=?", (user_id,)).fetchone() is not None
-
-
-def admin_keyboard(user_id: int, username: str | None = None) -> InlineKeyboardMarkup:
-    ban_btn = (
-        InlineKeyboardButton(text="✅ Разбан", callback_data=f"unban:{user_id}")
-        if is_banned(user_id)
-        else InlineKeyboardButton(text="🚫 Бан", callback_data=f"ban:{user_id}")
-    )
-    row = []
-    # Кнопку профиля показываем только если есть username (иначе Telegram
-    # может отклонить кнопку из-за настроек приватности пользователя)
-    if username:
-        row.append(InlineKeyboardButton(text="👤 Профиль", url=f"https://t.me/{username}"))
-    row.append(InlineKeyboardButton(text="ℹ️ Инфо", callback_data=f"info:{user_id}"))
-    row.append(ban_btn)
-    return InlineKeyboardMarkup(inline_keyboard=[row])
-
-
-@dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
-async def start(message: Message):
-    await message.answer(GREETING)
-
-
-# Сообщение от пользователя -> владельцу
-@dp.message(F.chat.type == ChatType.PRIVATE, F.from_user.id != ADMIN_ID)
-async def from_user(message: Message, bot: Bot):
-    if is_banned(message.from_user.id):
-        return
-
-    save_user(message.from_user)
-
-    copied = await bot.copy_message(
-        chat_id=ADMIN_ID,
-        from_chat_id=message.chat.id,
-        message_id=message.message_id,
-        reply_markup=admin_keyboard(message.from_user.id, message.from_user.username),
-    )
-    db.execute(
-        "INSERT OR REPLACE INTO msgs VALUES (?, ?, ?)",
-        (copied.message_id, message.from_user.id, message.message_id),
-    )
-    db.commit()
-
-    # Ответ пользователю с цитатой его сообщения
-    await message.reply(RECEIVED)
-
-
-# Ответ владельца (reply на пересланное сообщение) -> пользователю
-@dp.message(F.chat.id == ADMIN_ID, F.reply_to_message)
-async def from_admin(message: Message, bot: Bot):
-    row = db.execute(
-        "SELECT user_id, user_msg_id FROM msgs WHERE admin_msg_id=?",
-        (message.reply_to_message.message_id,),
-    ).fetchone()
-    if not row:
-        await message.reply("Не нашёл, кому отвечать. Отвечайте на пересланное сообщение пользователя.")
-        return
-
-    user_id, user_msg_id = row
-    try:
-        await bot.copy_message(
-            chat_id=user_id,
-            from_chat_id=ADMIN_ID,
-            message_id=message.message_id,
-            reply_parameters=ReplyParameters(message_id=user_msg_id, allow_sending_without_reply=True),
+# ================= DATABASE SETUP =================
+def init_db():
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            full_name TEXT
         )
-    except Exception as e:
-        await message.reply(f"Не удалось отправить: {e}")
+    """)
+    conn.commit()
+    conn.close()
 
+init_db()
 
-@dp.callback_query(F.from_user.id == ADMIN_ID, F.data.startswith("info:"))
-async def user_info(call: CallbackQuery):
-    uid = int(call.data.split(":")[1])
-    row = db.execute(
-        "SELECT full_name, username, first_seen FROM users WHERE user_id=?", (uid,)
-    ).fetchone()
-    full_name, username, first_seen = row if row else (None, None, None)
+def add_user_to_db(user_id: int, username: str, full_name: str):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR IGNORE INTO users (user_id, username, full_name) VALUES (?, ?, ?)
+    """, (user_id, username, full_name))
+    conn.commit()
+    conn.close()
 
-    text = (
-        "<b>Пользователь</b>\n\n"
-        f"ID: <code>{uid}</code>\n"
-        f"ФИО: {html.escape(full_name) if full_name else '—'}\n"
-        f"Username: {'@' + html.escape(username) if username else '—'}\n"
-        "UTM-метки: —\n"
-        "Мессенджер: Telegram\n"
-        f"Создан: {days_ago(first_seen)}"
-    )
-    await call.message.reply(text, parse_mode="HTML")
-    await call.answer()
+# ================= FSM (STATES) =================
+class UserState(StatesGroup):
+    waiting_for_message = State()
+    answering_user = State()
 
-
-@dp.callback_query(F.from_user.id == ADMIN_ID, F.data.startswith(("ban:", "unban:")))
-async def ban_toggle(call: CallbackQuery):
-    action, uid = call.data.split(":")
-    uid = int(uid)
-    if action == "ban":
-        db.execute("INSERT OR IGNORE INTO banned VALUES (?)", (uid,))
+# ================= HANDLERS =================
+@router.message(Command("start"))
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    add_user_to_db(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    
+    if message.from_user.id == ADMIN_ID:
+        await message.answer("👋 Привет, Администратор! Панель управления активна.")
     else:
-        db.execute("DELETE FROM banned WHERE user_id=?", (uid,))
-    db.commit()
+        await message.answer(
+            "👋 Hello! Напишите сообщение, и я передам его владельцу.\n"
+            "Владельцем данного бота является @frizixoff. Если у вас есть предложения, что добавить сюда, или вопросы – пишите. 🤗",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✍️ Написать сообщение", callback_data="send_feedback")]
+            ])
+        )
 
-    # достаём username из существующей кнопки профиля (если она была)
-    username = None
-    for row in call.message.reply_markup.inline_keyboard:
-        for b in row:
-            if b.url and b.url.startswith("https://t.me/"):
-                username = b.url.removeprefix("https://t.me/")
+@router.callback_query(F.data == "send_feedback")
+async def process_feedback_callback(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Напиши свое сообщение, и я отправлю его создателю:")
+    await state.set_state(UserState.waiting_for_message)
+    await callback.answer()
 
-    await call.message.edit_reply_markup(reply_markup=admin_keyboard(uid, username))
-    await call.answer("Готово")
+@router.message(UserState.waiting_for_message)
+async def receive_user_message(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    username = f"@{message.from_user.username}" if message.from_user.username else "нет юзернейма"
+    full_name = message.from_user.full_name
 
+    # Кнопка для ответа администратору прямо из сообщения
+    admin_markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply_{user_id}")]
+    ])
 
+    # Пересылаем админу
+    await message.bot.send_message(
+        ADMIN_ID,
+        f"📩 **Новое сообщение!**\n\n"
+        f"От: {full_name} ({username})\n"
+        f"ID: `{user_id}`\n\n"
+        f"Текст:\n{message.text}",
+        reply_markup=admin_markup,
+        parse_mode="Markdown"
+    )
+
+    await message.answer("✅ Твое сообщение успешно отправлено администратору!")
+    await state.clear()
+
+# Админ отвечает пользователю через инлайн-кнопку
+@router.callback_query(F.data.startswith("reply_"))
+async def admin_start_reply(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("У вас нет прав!", show_alert=True)
+        return
+
+    target_user_id = int(callback.data.split("_")[1])
+    await state.update_data(target_user_id=target_user_id)
+    
+    await callback.message.answer(f"Введите текст ответа для пользователя (`ID: {target_user_id}`):", parse_mode="Markdown")
+    await state.set_state(UserState.answering_user)
+    await callback.answer()
+
+@router.message(UserState.answering_user)
+async def admin_send_reply(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    data = await state.get_data()
+    target_user_id = data.get("target_user_id")
+
+    try:
+        await message.bot.send_message(
+            target_user_id,
+            f"💌 **Ответ от администратора:**\n\n{message.text}",
+            parse_mode="Markdown"
+        )
+        await message.answer("✅ Ответ успешно отправлен пользователю!")
+    except Exception as e:
+        await message.answer(f"❌ Не удалось отправить сообщение (возможно, пользователь заблокировал бота):\n`{e}`", parse_mode="Markdown")
+
+    await state.clear()
+
+# ================= MAIN =================
 async def main():
-    bot = Bot(TOKEN)
-    await dp.start_polling(bot)
+    bot = Bot(token=TOKEN)
+    dp = Dispatcher()
+    dp.include_router(router)
 
+    # Защита от конфликтов сессий
+    await bot.delete_webhook(drop_pending_updates=True)
+    logging.info("Бот успешно запущен и ожидает сообщения...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
