@@ -1,5 +1,5 @@
 services:
-  - type: web
+  - type: worker
     name: frizixconnectbot
     env: docker
     region: frankfurt
