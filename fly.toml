@@ -1,0 +1,7 @@
+app = "frizix-connect-bot"
+primary_region = "fra"
+
+[build]
+
+[env]
+  PORT = "8080"
