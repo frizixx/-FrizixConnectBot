@@ -1,11 +1,7 @@
 services:
-  - type: worker
-    name: FrizixConnectBot
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python feedback_bot.py
-    envVars:
-      - key: BOT_TOKEN
-        sync: false
-      - key: ADMIN_ID
-        sync: false
+  - type: web
+    name: frizixconnectbot
+    env: docker
+    region: frankfurt
+    plan: free
+    autoDeploy: true
