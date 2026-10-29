@@ -16,7 +16,7 @@ from aiogram.types import (
 )
 
 # Токен и ID берём из переменных окружения, а не из кода
-TOKEN = os.environ["9276476302:AAFdxdGBKwfwSi7U1WXxzDOY6Bg-H_HwVBQ"]
+TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = int(os.environ["5226782090"])  # ваш Telegram ID (узнать: @userinfobot)
 
 GREETING = "Привет! Напишите сообщение, и я передам его владельцу."
