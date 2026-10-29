@@ -8,7 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 # ================= CONFIGURATION =================
-TOKEN = "9276476302:AAFe8fSCfyyoH30_BawxanGryclNJB8IbBA"
+TOKEN = "9276476302:AAGNTb58xvxbw7VTXTNVzbPaFnmRFXXMaZI"
 ADMIN_ID = 5226782090  # Твой числовой Telegram ID
 
 logging.basicConfig(level=logging.INFO)
