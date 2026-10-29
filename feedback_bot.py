@@ -22,7 +22,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
-            full_name TEXT
+            full_name TEXT,
+            is_active INTEGER DEFAULT 1
         )
     """)
     conn.commit()
@@ -34,10 +35,30 @@ def add_user_to_db(user_id: int, username: str, full_name: str):
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT OR IGNORE INTO users (user_id, username, full_name) VALUES (?, ?, ?)
+        INSERT INTO users (user_id, username, full_name, is_active) 
+        VALUES (?, ?, ?, 1)
+        ON CONFLICT(user_id) DO UPDATE SET 
+            username=excluded.username, 
+            full_name=excluded.full_name,
+            is_active=1
     """, (user_id, username, full_name))
     conn.commit()
     conn.close()
+
+def set_user_status(user_id: int, status: int):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET is_active = ? WHERE user_id = ?", (status, user_id))
+    conn.commit()
+    conn.close()
+
+def get_user_status(user_id: int):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT is_active FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else 1
 
 def get_all_users():
     conn = sqlite3.connect("bot_database.db")
@@ -65,14 +86,16 @@ class UserState(StatesGroup):
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    add_user_to_db(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    user_id = message.from_user.id
+    add_user_to_db(user_id, message.from_user.username, message.from_user.full_name)
     
-    if message.from_user.id == ADMIN_ID:
+    if user_id == ADMIN_ID:
         await message.answer(
             "👋 Привет, Администратор!\n"
             "Панель управления активна. Используй команду /admin для доступа к функциям."
         )
     else:
+        set_user_status(user_id, 1)  # Включаем бота для пользователя при /start
         await message.answer(
             "👋 Hello! Напишите сообщение, и я передам его владельцу.\n"
             "Владельцем данного бота является @frizixoff. Если у вас есть предложения, что добавить сюда, или вопросы – пишите. 🤗\n\n"
@@ -95,9 +118,15 @@ async def cmd_admin(message: Message, state: FSMContext):
 @router.message(Command("stop"))
 async def cmd_stop(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("❌ Действие отменено.")
+    user_id = message.from_user.id
+    
+    if user_id == ADMIN_ID:
+        await message.answer("❌ Действие администратора отменено.")
+    else:
+        set_user_status(user_id, 0)  # Выключаем бота для пользователя
+        await message.answer("🔴 В данный момент бот отключен владельцем. Ожидайте!")
 
-# --- Управление админ-панелью (клики по кнопкам) ---
+# --- Управление админ-панелью ---
 @router.callback_query(F.data == "admin_stats")
 async def admin_stats_callback(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
@@ -130,20 +159,20 @@ async def execute_broadcast(message: Message, state: FSMContext):
     success = 0
     blocked = 0
 
-    await message.answer(f"⏳ Рассылка началась... Всего получателей: {len(users)}")
+    status_msg = await message.answer(f"⏳ Рассылка началась... Всего получателей: {len(users)}")
 
     for user_id in users:
         try:
             await message.bot.send_message(user_id, message.text)
             success += 1
-            await asyncio.sleep(0.05) # Небольшая пауза во избежание лимитов Telegram
+            await asyncio.sleep(0.04)  # Пауза против флуд-контроля Telegram
         except Exception:
             blocked += 1
 
-    await message.answer(
+    await status_msg.edit_text(
         f"✅ **Рассылка завершена!**\n\n"
         f"📤 Успешно доставлено: `{success}`\n"
-        f"❌ Заблокировали бота: `{blocked}`",
+        f"❌ Ошибок / заблокировали: `{blocked}`",
         parse_mode="Markdown"
     )
     await state.clear()
@@ -151,10 +180,16 @@ async def execute_broadcast(message: Message, state: FSMContext):
 # --- Прием сообщений от пользователей ---
 @router.message(UserState.waiting_for_message)
 async def receive_user_message(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+
+    # Проверяем, не отключен ли бот для этого пользователя
+    if get_user_status(user_id) == 0:
+        await message.answer("🔴 В данный момент бот отключен владельцем. Ожидайте!")
+        return
+
     if message.text and message.text.startswith("/"):
         return
 
-    user_id = message.from_user.id
     username = f"@{message.from_user.username}" if message.from_user.username else "нет юзернейма"
     full_name = message.from_user.full_name
 
@@ -172,7 +207,7 @@ async def receive_user_message(message: Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
-    await message.answer("✅ Твое сообщение успешно отправлено администратору! Можешь написать еще одно или ввести /stop.")
+    await message.answer("✅ Твое сообщение успешно отправлено администратору! Можешь написать еще одно или ввести /stop для отключения.")
 
 # --- Ответ администратора пользователю ---
 @router.callback_query(F.data.startswith("reply_"))
@@ -210,6 +245,16 @@ async def admin_send_reply(message: Message, state: FSMContext):
         await message.answer(f"❌ Не удалось отправить сообщение (возможно, пользователь заблокировал бота):\n`{e}`", parse_mode="Markdown")
 
     await state.clear()
+
+# Универсальный перехватчик для пользователей, у которых бот выключен через /stop
+@router.message()
+async def global_fallback_handler(message: Message):
+    if message.from_user.id == ADMIN_ID:
+        return
+    
+    user_id = message.from_user.id
+    if get_user_status(user_id) == 0:
+        await message.answer("🔴 В данный момент бот отключен владельцем. Ожидайте!")
 
 # ================= MAIN =================
 async def main():
